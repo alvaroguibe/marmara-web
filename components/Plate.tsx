@@ -83,10 +83,14 @@ const Plate: React.FC<PlateProps> = ({ shape, textureUrl }) => {
     // 1. ROUND PLATE
     if (shape === PlateShape.ROUND) {
       const radius = BASE_SIZE / 2;
-      const flatRadius = radius * 0.65; 
       const rimHeight = 0.15; 
       const radialSegments = 128; 
       
+      // Defined at top of block for scope access in Section D
+      const topSegments = 64;
+      const rimSteps = 8;
+      const bottomSegments = 48; // Increased segments for smoother bottom curve
+
       const points: THREE.Vector2[] = [];
       const uvRadii: number[] = []; 
 
@@ -95,21 +99,16 @@ const Plate: React.FC<PlateProps> = ({ shape, textureUrl }) => {
       let lastPos = new THREE.Vector2(0, 0);
 
       // A. Top Surface Profile
-      const topSegments = 64;
       for (let i = 0; i <= topSegments; i++) {
         const t = i / topSegments;
         
-        // CRITICAL FIX: Use epsilon (0.00001) instead of 0 to prevent LatheGeometry 
-        // from welding vertices at the center pole. This preserves the vertex count 
-        // per ring needed for our custom UV index math.
-        const x = Math.max(t * radius, 0.00001); 
+        // Use epsilon to ensure stability for LatheGeometry generation
+        // (Prevents vertex welding at the exact center, maintaining ring count)
+        const x = Math.max(t * radius, 0.001); 
 
-        let y = 0;
-
-        if (x > flatRadius) {
-          const tCurve = (x - flatRadius) / (radius - flatRadius);
-          y = (tCurve * tCurve) * rimHeight;
-        }
+        // Continuous parabolic curve for the profile (no flat center)
+        // y = (x / radius)^2 * rimHeight
+        const y = Math.pow(t, 2) * rimHeight;
         
         const currentPos = new THREE.Vector2(x, y);
         points.push(currentPos);
@@ -122,7 +121,6 @@ const Plate: React.FC<PlateProps> = ({ shape, textureUrl }) => {
       }
 
       // B. Rim / Edge Transition (Wrap around)
-      const rimSteps = 8;
       const topY = rimHeight;
       const bottomY = rimHeight - thickness;
 
@@ -147,15 +145,15 @@ const Plate: React.FC<PlateProps> = ({ shape, textureUrl }) => {
       }
 
       // C. Bottom Surface 
-      // We push UVs further out so they clamp to the edge color (solid) 
-      // instead of creating noise.
-      const bottomSegments = 12;
+      // Follows the same curve shape back to center
       for (let i = 0; i <= bottomSegments; i++) {
          const t = i / bottomSegments;
-         // Simple flat bottom or slight curve
-         const x = THREE.MathUtils.lerp(radius, flatRadius, t);
-         // Taper thickness slightly
-         const y = bottomY - (t * 0.01); 
+         // Linear interpolation from edge (radius) back to center (0.001)
+         const x = THREE.MathUtils.lerp(radius, 0.001, t);
+         
+         // Calculate curve height at this X, then subtract thickness
+         const curveY = Math.pow(x / radius, 2) * rimHeight;
+         const y = curveY - thickness;
          
          const currentPos = new THREE.Vector2(x, y);
          points.push(currentPos);
@@ -172,21 +170,42 @@ const Plate: React.FC<PlateProps> = ({ shape, textureUrl }) => {
       uvAttribute.needsUpdate = true;
       
       // CRITICAL: Normalize UVs by the TOTAL unwrapped diameter (including rim)
-      // This scales the texture down slightly so it fits the Top + Rim
       const maxUVRadius = radius + accumulatedRimDist;
       const diameterUV = maxUVRadius * 2;
+      
+      const totalProfilePoints = uvRadii.length;
+      // Calculate the normalized V value where the top surface ends.
+      // Used to switch from Planar to Polar mapping.
+      const topSurfaceRatio = topSegments / (topSegments + rimSteps + bottomSegments);
 
       for (let i = 0; i < posAttribute.count; i++) {
-        const ringIndex = Math.floor(i / (radialSegments + 1));
+        const x = posAttribute.getX(i);
+        const z = posAttribute.getZ(i);
         
-        if (ringIndex < uvRadii.length) {
+        // Get the original V coordinate from LatheGeometry (0 to 1 along profile)
+        const originalV = uvAttribute.getY(i);
+        
+        // --- HYBRID MAPPING STRATEGY ---
+        
+        // 1. TOP SURFACE (Strict Cartesian Planar Mapping)
+        // If we are on the top surface, we map X/Z directly to U/V.
+        // This completely avoids Math.atan2 and singularities at the center.
+        // We use a small buffer (+0.005) to ensure the exact edge loop is included.
+        if (originalV <= topSurfaceRatio + 0.005) {
+          const u = (x / diameterUV) + 0.5;
+          const v = (z / diameterUV) + 0.5;
+          uvAttribute.setXY(i, u, v);
+        } 
+        
+        // 2. RIM & BOTTOM (Polar Arc-Length Mapping)
+        // For the edge and bottom, we use the unwrapped accumulated radius to curve the texture.
+        else {
+          let ringIndex = Math.round(originalV * (totalProfilePoints - 1));
+          ringIndex = Math.max(0, Math.min(ringIndex, totalProfilePoints - 1));
+
           const rUV = uvRadii[ringIndex];
-          const x = posAttribute.getX(i);
-          const z = posAttribute.getZ(i);
-          
           const angle = Math.atan2(z, x);
 
-          // Standard Circular Mapping normalized to new Diameter
           const u = (rUV * Math.cos(angle)) / diameterUV + 0.5;
           const v = (rUV * Math.sin(angle)) / diameterUV + 0.5;
           
@@ -210,7 +229,9 @@ const Plate: React.FC<PlateProps> = ({ shape, textureUrl }) => {
       const minDim = Math.min(width, height);
       const flatRadius = (minDim / 2) * 0.60; 
       
-      const liftHeight = shape === PlateShape.RECTANGULAR ? 0.08 : 0.15;
+      // Reduced lift height by another 50% for realistic look based on feedback
+      // Was 0.04 : 0.075 -> Now 0.02 : 0.035
+      const liftHeight = shape === PlateShape.RECTANGULAR ? 0.02 : 0.035;
 
       for (let i = 0; i < positionAttribute.count; i++) {
         vertex.fromBufferAttribute(positionAttribute, i);
