@@ -4,6 +4,17 @@ import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { PlateShape, SIGNATURE_TEXTURE_URL, NOISE_TEXTURE_URL } from '../types';
 
+declare global {
+  namespace JSX {
+    interface IntrinsicElements {
+      group: any;
+      mesh: any;
+      primitive: any;
+      meshBasicMaterial: any;
+    }
+  }
+}
+
 interface PlateProps {
   shape: PlateShape;
   textureUrl: string | null;
@@ -188,9 +199,6 @@ const Plate: React.FC<PlateProps> = ({ shape, textureUrl }) => {
         // --- HYBRID MAPPING STRATEGY ---
         
         // 1. TOP SURFACE (Strict Cartesian Planar Mapping)
-        // If we are on the top surface, we map X/Z directly to U/V.
-        // This completely avoids Math.atan2 and singularities at the center.
-        // We use a small buffer (+0.005) to ensure the exact edge loop is included.
         if (originalV <= topSurfaceRatio + 0.005) {
           const u = (x / diameterUV) + 0.5;
           const v = (z / diameterUV) + 0.5;
@@ -198,7 +206,6 @@ const Plate: React.FC<PlateProps> = ({ shape, textureUrl }) => {
         } 
         
         // 2. RIM & BOTTOM (Polar Arc-Length Mapping)
-        // For the edge and bottom, we use the unwrapped accumulated radius to curve the texture.
         else {
           let ringIndex = Math.round(originalV * (totalProfilePoints - 1));
           ringIndex = Math.max(0, Math.min(ringIndex, totalProfilePoints - 1));
@@ -212,6 +219,22 @@ const Plate: React.FC<PlateProps> = ({ shape, textureUrl }) => {
           uvAttribute.setXY(i, u, v);
         }
       }
+
+      // E. GROUPING FOR MULTI-MATERIAL
+      // LatheGeometry builds faces ring by ring starting from the first profile segment.
+      // 6 indices per quad (2 triangles * 3 vertices) per radial segment.
+      const indicesPerRing = radialSegments * 6;
+      
+      // The cut-off point is where the rim ends and the bottom begins.
+      // Top segments (topSegments) + Rim segments (rimSteps).
+      const splitSegmentIndex = topSegments + rimSteps;
+      const indexSplit = splitSegmentIndex * indicesPerRing;
+
+      geo.clearGroups();
+      // Group 0: Top + Rim -> Material 0
+      geo.addGroup(0, indexSplit, 0);
+      // Group 1: Bottom -> Material 1
+      geo.addGroup(indexSplit, Infinity, 1);
       
       geo.computeVertexNormals();
       return geo;
@@ -229,8 +252,6 @@ const Plate: React.FC<PlateProps> = ({ shape, textureUrl }) => {
       const minDim = Math.min(width, height);
       const flatRadius = (minDim / 2) * 0.60; 
       
-      // Reduced lift height by another 50% for realistic look based on feedback
-      // Was 0.04 : 0.075 -> Now 0.02 : 0.035
       const liftHeight = shape === PlateShape.RECTANGULAR ? 0.02 : 0.035;
 
       for (let i = 0; i < positionAttribute.count; i++) {
@@ -254,21 +275,21 @@ const Plate: React.FC<PlateProps> = ({ shape, textureUrl }) => {
   // --- MATERIALS ---
 
   const goldBackMaterial = new THREE.MeshStandardMaterial({
-    color: new THREE.Color('#C8A050'), 
-    roughness: 0.6,
-    metalness: 1.0,
+    color: new THREE.Color('#FFC060'), // Rich warm amber/gold
+    roughness: 0.2, // Reduced roughness for better metallic reflection
+    metalness: 1.0,  
     bumpMap: noiseTexture || null,
-    bumpScale: 0.02,
-    envMapIntensity: 0.8,
+    bumpScale: 0.015,
+    envMapIntensity: 1.0,
   });
 
   const glassTopMaterial = new THREE.MeshStandardMaterial({
     color: '#ffffff', 
     map: textureUrl ? topTexture : null,
-    roughness: 0.5, 
-    metalness: 0.0, 
-    envMapIntensity: 0.25,
-    toneMapped: false,
+    roughness: 0.4, 
+    metalness: 0.1, 
+    envMapIntensity: 0.5,
+    toneMapped: false, // Critical: Preserve artwork colors
     transparent: false,
     side: THREE.DoubleSide
   });
@@ -282,9 +303,13 @@ const Plate: React.FC<PlateProps> = ({ shape, textureUrl }) => {
         receiveShadow
       >
         {shape === PlateShape.ROUND ? (
-          <primitive object={glassTopMaterial} attach="material" />
+          <>
+            <primitive object={glassTopMaterial} attach="material-0" />
+            <primitive object={goldBackMaterial} attach="material-1" />
+          </>
         ) : (
           <>
+            {/* BoxGeometry mapping: 0:Right, 1:Left, 2:Top, 3:Bottom, 4:Front, 5:Back */}
             <primitive object={goldBackMaterial} attach="material-0" />
             <primitive object={goldBackMaterial} attach="material-1" />
             <primitive object={glassTopMaterial} attach="material-2" /> 
@@ -296,18 +321,20 @@ const Plate: React.FC<PlateProps> = ({ shape, textureUrl }) => {
 
         {signatureTexture && (
           <Decal
-            position={[0, -0.15, 0]} 
+            position={[0, -0.05, 0]} // Fixed Z/Y position to sit on the bottom surface
             rotation={[-Math.PI / 2, 0, 0]} 
-            scale={[1.5, 0.75, 0.15]} 
+            scale={[1.5, 0.75, 0.2]} 
           >
             <meshBasicMaterial 
               map={signatureTexture} 
               transparent 
-              opacity={0.9} 
+              opacity={0.85} 
               depthTest={true} 
               depthWrite={false}
               polygonOffset
               polygonOffsetFactor={-4}
+              toneMapped={false} // Ensure signature is dark and crisp
+              color={new THREE.Color('#331100')} 
             />
           </Decal>
         )}
